@@ -265,6 +265,7 @@ def parse_resolved_case_timeslot(timeslot_str):
         start_datetime = datetime.combine(date_obj, start_time)
         end_datetime = datetime.combine(date_obj, end_time)
         
+        st.session_state.logs.append(f"Parsed timeslot '{timeslot_str}' to {start_datetime} - {end_datetime}")
         return start_datetime, end_datetime
     except Exception as e:
         st.session_state.logs.append(f"Error parsing timeslot '{timeslot_str}': {e}")
@@ -274,12 +275,17 @@ def can_group_with_resolved_case(open_case_coord, resolved_case_coord, open_case
     """Check if an open case can be grouped with a resolved case based on proximity and duration."""
     # Only group cases if both have exactly 1-hour duration
     if open_case_duration != 1 or resolved_case_duration != 1:
+        st.session_state.logs.append(f"Can't group: Duration mismatch - Open case: {open_case_duration}h, Resolved case: {resolved_case_duration}h")
         return False
     
     # Check distance
     distance_km = geodesic(open_case_coord, resolved_case_coord).km
+    st.session_state.logs.append(f"Distance check: {distance_km:.2f} km between open case and resolved case")
+    
     # Check if open case is within 1km of the resolved case
-    return distance_km < 1.0
+    result = distance_km < 1.0
+    st.session_state.logs.append(f"Can group based on distance: {result}")
+    return result
 
 def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_times, resolved_cases, blocked_slots=None, 
                                          holidays_set=None, current_date=datetime.now().date(), 
@@ -357,19 +363,43 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     
     # Parse resolved cases to get datetime objects
     parsed_resolved_cases = []
+    
+    # First, create a dictionary to track timeslots and count cases in each slot
+    timeslot_groups = {}  # key: (start_time, end_time), value: count of cases
+    
+    # First pass - collect timeslot information
+    for case in resolved_cases:
+        start_dt, end_dt = parse_resolved_case_timeslot(case["timeslot"])
+        if start_dt and end_dt:
+            timeslot_key = (start_dt, end_dt)
+            if timeslot_key in timeslot_groups:
+                timeslot_groups[timeslot_key] += 1
+            else:
+                timeslot_groups[timeslot_key] = 1
+    
+    # Second pass - create parsed_resolved_cases with correct grouped_cases count
     for case in resolved_cases:
         start_dt, end_dt = parse_resolved_case_timeslot(case["timeslot"])
         if start_dt and end_dt:
             # Calculate the duration in hours
             duration_hours = (end_dt - start_dt).total_seconds() / 3600
+            # Get the count of resolved cases already in this timeslot
+            timeslot_key = (start_dt, end_dt)
+            group_count = timeslot_groups[timeslot_key]
+            
             parsed_resolved_cases.append({
                 "case_id": case["case_id"],
                 "location": case["location"],
                 "start_time": start_dt,
                 "end_time": end_dt,
-                "grouped_cases": 1,  # Initialize counter for cases in this slot
-                "duration": duration_hours  # Add duration information
+                "grouped_cases": group_count,  # Set initial count to total cases in this timeslot
+                "duration": duration_hours,  # Add duration information
+                "timeslot_key": timeslot_key  # Add timeslot key for easier lookups
             })
+    
+    st.session_state.logs.append(f"Found {len(timeslot_groups)} unique timeslots among {len(resolved_cases)} resolved cases")
+    for key, count in timeslot_groups.items():
+        st.session_state.logs.append(f"Timeslot {key[0]} - {key[1]}: {count} cases")
     
     # Sort resolved cases by start_time
     parsed_resolved_cases.sort(key=lambda x: x["start_time"])
@@ -399,13 +429,19 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
         for resolved_case in parsed_resolved_cases:
             resolved_coord = resolved_case["location"]
             resolved_duration = resolved_case["duration"]
+            timeslot_key = resolved_case["timeslot_key"]
             
             # Check if can be grouped based on proximity, duration, and available slots
             if (can_group_with_resolved_case(open_coord, resolved_coord, inspection_time, resolved_duration) and 
                 resolved_case["grouped_cases"] < max_cases_per_slot):
                 open_cases_to_group.append((i, open_coord, open_postal, resolved_case))
-                resolved_case["grouped_cases"] += 1
-                st.session_state.logs.append(f"Grouping open case {open_postal} with resolved case {resolved_case['case_id']}")
+                
+                # Update grouped_cases counter for ALL resolved cases with the same timeslot
+                for rc in parsed_resolved_cases:
+                    if rc["timeslot_key"] == timeslot_key:
+                        rc["grouped_cases"] += 1
+                
+                st.session_state.logs.append(f"Grouping open case {open_postal} with resolved case {resolved_case['case_id']} (now {resolved_case['grouped_cases']} cases in this slot)")
                 break  # Once grouped with a resolved case, don't try to group with others
     
     # Helper function to get key value for sorting slots
@@ -829,6 +865,9 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             cases_to_group_with_last = []
             cases_for_new_slots = []
             
+            # Get the timeslot key of the last resolved case
+            last_timeslot_key = last_resolved["timeslot_key"]
+            
             for case in ordered_cases:
                 inspection_time = inspection_times_map[case[0]]
                 
@@ -836,8 +875,13 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                 if (can_group_with_resolved_case(case[0], start_coord, inspection_time, resolved_duration) and 
                     last_resolved["grouped_cases"] < max_cases_per_slot):
                     cases_to_group_with_last.append(case)
-                    last_resolved["grouped_cases"] += 1
-                    st.session_state.logs.append(f"Grouping case {case[1]} with last resolved case {last_resolved['case_id']}")
+                    
+                    # Update grouped_cases for ALL resolved cases with the same timeslot
+                    for rc in parsed_resolved_cases:
+                        if rc["timeslot_key"] == last_timeslot_key:
+                            rc["grouped_cases"] += 1
+                    
+                    st.session_state.logs.append(f"Grouping case {case[1]} with last resolved case {last_resolved['case_id']} (now {last_resolved['grouped_cases']} cases in this slot)")
                 else:
                     cases_for_new_slots.append(case)
             
@@ -935,6 +979,20 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     
     # Sort the final result by timeslot
     final_result.sort(key=get_slot_time)
+    
+    # Add a summary log of the final result
+    timeslot_case_counts = {}
+    for _, _, timeslot in final_result:
+        if timeslot in timeslot_case_counts:
+            timeslot_case_counts[timeslot] += 1
+        else:
+            timeslot_case_counts[timeslot] = 1
+    
+    st.session_state.logs.append("Final scheduling summary:")
+    for timeslot, count in timeslot_case_counts.items():
+        st.session_state.logs.append(f"Timeslot {timeslot}: {count} cases")
+        if count > max_cases_per_slot:
+            st.session_state.logs.append(f"WARNING: Timeslot {timeslot} has {count} cases, which exceeds the maximum of {max_cases_per_slot}!")
     
     return final_result
 # endregion
