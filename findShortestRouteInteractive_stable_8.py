@@ -133,11 +133,12 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
     prev_group_last_coord = route_with_postal[0][0] if route_with_postal else None
 
     def move_to_next_day(current_time):
+        start_hour_of_next_day = 9
         st.session_state.logs.append(f"Moving to next day from {current_time}")
         next_day = current_time + timedelta(days=1)
         while next_day.weekday() >= 5 or next_day.date() in holidays_set:
             next_day += timedelta(days=1)
-        return next_day.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+        return next_day.replace(hour=start_hour_of_next_day, minute=0, second=0, microsecond=0)
 
     def exceeds_end_hour(start_time, duration):
         end_time = start_time + duration
