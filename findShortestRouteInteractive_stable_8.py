@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, time
 import math
 # Add this at the top with other imports
 from streamlit.components.v1 import html
+
+# Define valuer's home location
+valuer_home = [1.3521, 103.8198]
+
 #region Logic
 def parse_blocked_times(blocked_times_str):
     if not blocked_times_str:
@@ -323,8 +327,9 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             # Extract coordinates for routing
             coords_only = [case[0] for case in open_cases_with_postal]
             
-            # Start with the first case by default
-            start_coord = coords_only[0]
+            # Start with the coordinate closest to valuer's home
+            start_coord = min(coords_only, key=lambda x: geodesic(x, valuer_home).km)
+            st.session_state.logs.append(f"Starting with the case closest to valuer's home: {start_coord}")
             
             # Find optimal route using shortest path
             optimal_route = find_shortest_path(coords_only, start_coord)
@@ -852,7 +857,21 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             start_coord = last_resolved["location"]
             resolved_duration = last_resolved["duration"]
             
-            # Find optimal route starting from last resolved case
+            # Check if we're starting a new day after the last resolved case
+            current_date = start_time.date()
+            next_day = current_date + timedelta(days=1)
+            while next_day.weekday() >= 5 or next_day in holidays_set:
+                next_day += timedelta(days=1)
+                
+            # If starting a new day, use valuer's home as reference for finding the starting case
+            if start_time.hour >= end_hour or (start_time + timedelta(hours=1)).hour > end_hour:
+                # If we're moving to the next day, start from valuer's home location
+                st.session_state.logs.append(f"Starting a new day after last resolved case, using valuer's home as reference")
+                nearest_to_home = min(remaining_open_cases, key=lambda x: geodesic(x[0], valuer_home).km)
+                st.session_state.logs.append(f"Selected case nearest to valuer's home: {nearest_to_home[1]}")
+                start_coord = nearest_to_home[0]
+            
+            # Find optimal route starting from selected starting point
             coords_only = [x[0] for x in remaining_open_cases]
             nearest_to_start = min(coords_only, key=lambda x: geodesic(x, start_coord).km)
             optimal_route = find_shortest_path(coords_only, nearest_to_start)
@@ -944,8 +963,10 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                 # Extract coordinates for routing
                 coords_only = [case[0] for case in remaining_open_cases]
                 
-                # Start with the first case by default
-                start_coord = coords_only[0]
+                # TODO: Check carefully if this is correct
+                # Start with the case closest to valuer's home
+                start_coord = min(coords_only, key=lambda x: geodesic(x, valuer_home).km)
+                st.session_state.logs.append(f"Starting with case closest to valuer's home: {start_coord}")
                 
                 # Find optimal route using shortest path
                 optimal_route = find_shortest_path(coords_only, start_coord)
@@ -1127,6 +1148,13 @@ if st.session_state.route_data:
     route_with_timeslot = st.session_state.route_data
     m = folium.Map(location=route_with_timeslot[0][0], zoom_start=13)
     
+    # Add valuer's home as a black square marker
+    folium.Marker(
+        valuer_home,
+        icon=folium.Icon(color="black", icon="home"),
+        tooltip="Valuer's Home"
+    ).add_to(m)
+    
     # Sort route by timeslot for visualization (chronological order)
     def get_timeslot_datetime(item):
         try:
@@ -1199,7 +1227,15 @@ if st.session_state.route_data:
     ).add_to(m)
 else:
     # Show default map if no route is available
-    m = folium.Map(location=[1.3521, 103.8198], zoom_start=12)
+    m = folium.Map(location=valuer_home, zoom_start=12)
+    
+    # Add valuer's home as a black square marker
+    folium.Marker(
+        valuer_home,
+        icon=folium.Icon(color="black", icon="home"),
+        tooltip="Valuer's Home"
+    ).add_to(m)
+    
     Draw(
         export=False,
         draw_options={"polyline": False, "rectangle": False, "circle": False, "circlemarker": False, "polygon": False},
