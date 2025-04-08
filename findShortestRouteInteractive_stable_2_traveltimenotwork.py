@@ -184,18 +184,9 @@ if "show_route" not in st.session_state:
 if "route_data" not in st.session_state:
     st.session_state.route_data = None
 if "inspection_times" not in st.session_state:
-    st.session_state.inspection_times = []  # Changed to list
+    st.session_state.inspection_times = {}
 if "blocked_slots" not in st.session_state:
     st.session_state.blocked_slots = []
-if 'resolved_points' not in st.session_state:
-    st.session_state.resolved_points = []
-if "resolved_inspection_times" not in st.session_state:
-    st.session_state.resolved_inspection_times = []
-if 'resolved_datetimes' not in st.session_state:
-    st.session_state.resolved_datetimes = []
-if "resolving_index" not in st.session_state:
-    st.session_state.resolving_index = None
-
 
 # Streamlit App
 st.set_page_config(layout="centered")
@@ -301,7 +292,7 @@ with col1:
             # Get inspection time inputs (ensure they retain the previous values)
             inspection_times = []
             for i in range(len(st.session_state.points)):
-                inspection_time = st.session_state.inspection_times[i] if i < len(st.session_state.inspection_times) else 1  # Default to 1 if not set
+                inspection_time = st.session_state.inspection_times.get(i, 1)  # Default to 1 if not set
                 inspection_times.append(inspection_time)
             
             # When calling assign_timeslots_stable_with_travel_time, add blocked_slots parameter:
@@ -321,111 +312,24 @@ with col2:
         st.session_state.route_data = None
         st.session_state.inspection_times = {}
 
-# Display current open points and resolved cases
+# Display current points (with correct order based on the route)
 if st.session_state.points:
-    st.write("Current Open Cases:")
+    st.write("Current points:")
     for i, point in enumerate(st.session_state.points):
         lat, lng = point
+        # Generate the label based on the current index
         label = f"P{i+1:03}"
-        # Check if point is in resolved points
-        is_resolved = False
-        resolved_timeslot = "N/A"
-
-        for j, resolved_point in enumerate(st.session_state.resolved_points):
-            if (resolved_point[0] == lat and resolved_point[1] == lng):
-                is_resolved = True
-                resolved_timeslot = st.session_state.resolved_datetimes[j]
-                break
-
-        status = "Resolved" if is_resolved else "Open"
-        st.write(f"Point {label}: Latitude {lat:.4f}, Longitude {lng:.4f}, Status: {status}, TimeSlot: {resolved_timeslot}")
-
-        # Inspection time input
-        inspection_time = st.number_input(
-            f"Inspection Time for Point {i+1}: {label}",
-            min_value=1, max_value=8,
-            value=st.session_state.inspection_times[i] if i < len(st.session_state.inspection_times) else 1,
-            key=f"inspection_time_{i}"
-        )
-        if i < len(st.session_state.inspection_times):
-            st.session_state.inspection_times[i] = inspection_time
-
-        # Delete and Resolve buttons
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button(f"❌ Delete {label}", key=f"delete_{i}"):
-                st.session_state.points.pop(i)
-                if i < len(st.session_state.inspection_times):
-                    st.session_state.inspection_times.pop(i)
-                st.session_state.show_route = False
-                st.session_state.route_data = None
-                st.success(f"✅ Point {label} deleted.")
-                st.experimental_rerun()
-        with col2:
-            if st.button(f"✅ Resolve {label}", key=f"resolve_{i}"):
-                # Create form for datetime input
-                with st.form(key=f'resolve_form_{i}'):
-                    timeslot = st.text_input(
-                        "Enter timeslot (Format: DD/MM/YYYY HH:MM - HH:MM)",
-                        value=datetime.now().strftime("%d/%m/%Y 09:00 - 10:00"),
-                        placeholder="30/04/2025 13:00 - 16:30",
-                        key=f"timeslot_input_{i}"
-                    )
-                    submit_resolve = st.form_submit_button("Confirm Resolution")
-
-                if submit_resolve:
-                    try:
-                        # Validate datetime format
-                        import re
-                        pattern = r'^\d{2}/\d{2}/\d{4}\s\d{2}:\d{2}\s-\s\d{2}:\d{2}$'
-                        if not re.match(pattern, timeslot):
-                            st.error("Invalid format. Please use: DD/MM/YYYY HH:MM - HH:MM")
-                            continue
-
-                        if i < len(st.session_state.points) and i < len(st.session_state.inspection_times):
-                            resolved_point = st.session_state.points.pop(i)
-                            resolved_time = st.session_state.inspection_times.pop(i)
-
-                            if not hasattr(st.session_state, 'resolved_points'):
-                                st.session_state.resolved_points = []
-                                st.session_state.resolved_inspection_times = []
-                                st.session_state.resolved_datetimes = []
-
-                            st.session_state.resolved_points.append(resolved_point)
-                            st.session_state.resolved_inspection_times.append(resolved_time)
-                            st.session_state.resolved_datetimes.append(timeslot)
-                            st.session_state.show_route = False
-                            st.session_state.route_data = None
-                            st.success(f"✅ Point {label} resolved for {timeslot}")
-                            st.experimental_rerun()
-                        else:
-                            st.error("Invalid point index or missing inspection time")
-                    except Exception as e:
-                        st.error(f"Error resolving point: {str(e)}")
-
-# Update resolved cases display
-if st.session_state.resolved_points:
-    st.write("### Resolved Cases")
-    for j, resolved_point in enumerate(st.session_state.resolved_points):
-        col1, col2, col3, col4 = st.columns([2, 1, 2, 1])
-        with col1:
-            st.write(f"📍 Case {j+1}: {resolved_point}")
-        with col2:
-            st.write(f"⏱️ {st.session_state.resolved_inspection_times[j]} min")
-        with col3:
-            st.write(f"📅 {st.session_state.resolved_datetimes[j]}")
-        with col4:
-            if st.button("↩️ Unresolve", key=f"unresolve_{j}"):
-                st.session_state.points.append(st.session_state.resolved_points.pop(j))
-                st.session_state.inspection_times.append(st.session_state.resolved_inspection_times.pop(j))
-                st.session_state.resolved_datetimes.pop(j)
-                st.session_state.show_route = False
-                st.session_state.route_data = None
-                st.experimental_rerun()
-
-# Update map to show resolved cases
-for coord in st.session_state.resolved_points:
-    folium.Marker(
-        location=coord,
-        icon=folium.Icon(color="gray", icon="flag", prefix="fa")
-    ).add_to(m)
+        st.write(f"Point {label}: Latitude {lat:.4f}, Longitude {lng:.4f}")
+        
+        # Add an inspection time input for each point
+        inspection_time = st.number_input(f"Inspection Time for Point {i+1}: {label}", min_value=1, max_value=8, value=st.session_state.inspection_times.get(i, 1), key=f"inspection_time_{i}")
+        st.session_state.inspection_times[i] = inspection_time  # Store the input value
+        
+        # Add a delete button for each point
+        delete_button = st.button(f"❌ Delete {label}", key=f"delete_{i}")
+        if delete_button:
+            st.session_state.points.pop(i)
+            st.session_state.show_route = False  # Reset the route when a point is deleted
+            st.session_state.route_data = None  # Clear the route data
+            st.success(f"✅ Point {label} deleted successfully.")
+            break  # Break to avoid mutating the list while iterating over it

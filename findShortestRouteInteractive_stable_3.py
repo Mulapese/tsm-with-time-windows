@@ -12,20 +12,31 @@ def parse_blocked_times(blocked_times_str):
     blocked_ranges = []
     ranges = [r.strip() for r in blocked_times_str.split(',')]
     for time_range in ranges:
-        start, end = map(str.strip, time_range.split('-'))
-        start_h, start_m = map(int, start.split(':'))
-        end_h, end_m = map(int, end.split(':'))
-        blocked_ranges.append((
-            timedelta(hours=start_h, minutes=start_m),
-            timedelta(hours=end_h, minutes=end_m)
-        ))
+        date_time_parts = time_range.split()
+        date_str = date_time_parts[0]
+        start_time = date_time_parts[1]
+        end_time = date_time_parts[3]  # Skip the "-" at index 2
+        
+        # Parse date
+        date_obj = datetime.strptime(date_str, '%d/%m/%Y')
+        
+        # Parse start and end times
+        start_h, start_m = map(int, start_time.split(':'))
+        end_h, end_m = map(int, end_time.split(':'))
+        
+        # Create full datetime objects
+        start_datetime = date_obj.replace(hour=start_h, minute=start_m)
+        end_datetime = date_obj.replace(hour=end_h, minute=end_m)
+        
+        blocked_ranges.append((start_datetime, end_datetime))
     return blocked_ranges
 
 def is_time_blocked(current_time, duration, blocked_slots):
-    slot_start = timedelta(hours=current_time.hour, minutes=current_time.minute)
-    slot_end = slot_start + duration
+    slot_end = current_time + duration
     for blocked_start, blocked_end in blocked_slots:
-        if not (slot_end <= blocked_start or slot_start >= blocked_end):
+        # Compare dates and times
+        if (current_time.date() == blocked_start.date() and 
+            not (slot_end <= blocked_start or current_time >= blocked_end)):
             return True
     return False
 
@@ -58,6 +69,10 @@ def calculate_travel_time_km(coord1, coord2):
     return geodesic(coord1, coord2).km * 10  # Example: 2 minutes per km
 
 def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times, blocked_slots=None, start_hour=9, end_hour=18, max_distance_km=1, max_cases_per_slot=3):
+    st.write(f"Assigning timeslots with travel time for route: {route_with_postal}")
+    st.write(f"Inspection times: {inspection_times}")
+    st.write(f"Blocked slots: {blocked_slots}")
+    st.write(f"Start hour: {start_hour}, End hour: {end_hour}, Max distance: {max_distance_km} km, Max cases per slot: {max_cases_per_slot}")
     if blocked_slots is None:
         blocked_slots = []
         
@@ -66,21 +81,26 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
     current_time = base_time
     group = []
     group_time = timedelta(hours=1)
-    prev_group_end_time = None
-    prev_group_last_coord = None
+    prev_group_end_time = datetime.now().replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    prev_group_last_coord = route_with_postal[0][0] if route_with_postal else None
 
     def move_to_next_day(current_time):
+        st.write(f"Moving to next day from {current_time}")
         return (current_time + timedelta(days=1)).replace(hour=start_hour, minute=0, second=0, microsecond=0)
 
     def exceeds_end_hour(start_time, duration):
         end_time = start_time + duration
-        return end_time.hour > end_hour or (end_time.hour == end_hour and end_time.minute > 0)
+        result = end_time.hour > end_hour or (end_time.hour == end_hour and end_time.minute > 0)
+        st.write(f"Checking if exceeds end hour: Start {start_time}, Duration {duration}, Result {result}")
+        return result
 
     def find_next_available_time(current_time, duration, blocked_slots, end_hour):
-        while is_time_blocked(current_time, duration, blocked_slots):
+        while is_time_blocked(current_time, duration, blocked_slots) or exceeds_end_hour(current_time, duration):
+            st.write(f"Time blocked or exceeds end hour: Current {current_time}, Duration {duration}")
             current_time += timedelta(minutes=30)
-            if current_time.hour >= end_hour:
+            if current_time.hour >= end_hour or exceeds_end_hour(current_time, duration):
                 current_time = move_to_next_day(current_time)
+        st.write(f"Next available time: {current_time}")
         return current_time
 
     for i, (coord, postal) in enumerate(route_with_postal):
@@ -93,14 +113,16 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
                 if exceeds_end_hour(current_time, group_time):
                     current_time = move_to_next_day(current_time)
                 group_end = current_time + group_time
+                st.write(f"Assigning group timeslot: Start {current_time}, End {group_end}")
                 timeslots.append((group, current_time, group_end.strftime("%H:%M")))
                 prev_group_end_time = group_end
-                prev_group_last_coord = group[-1][0]
+                prev_group_last_coord = group[-1][0] if group else prev_group_last_coord
                 current_time = group_end
                 group = []
 
             if prev_group_end_time is not None:
                 travel_time_min = calculate_travel_time_km(prev_group_last_coord, coord)
+                st.write(f"Travel time from {prev_group_last_coord} to {coord}: {travel_time_min} minutes")
                 rounded_travel_time = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                 new_start_time = prev_group_end_time + rounded_travel_time
                 current_time = find_next_available_time(new_start_time, timedelta(hours=inspection_time), blocked_slots, end_hour)
@@ -114,6 +136,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
             current_time = find_next_available_time(current_time, duration, blocked_slots, end_hour)
             start = current_time
             end = current_time + duration
+            st.write(f"Assigning single case timeslot: Start {start}, End {end}")
             timeslots.append(([case], start, end.strftime("%H:%M")))
             prev_group_end_time = end
             prev_group_last_coord = coord
@@ -122,6 +145,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
             if not group:
                 if prev_group_end_time is not None:
                     travel_time_min = calculate_travel_time_km(prev_group_last_coord, coord)
+                    st.write(f"Travel time from {prev_group_last_coord} to {coord}: {travel_time_min} minutes")
                     rounded_travel_time = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                     new_start_time = prev_group_end_time + rounded_travel_time
                     current_time = find_next_available_time(new_start_time, group_time, blocked_slots, end_hour)
@@ -135,6 +159,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
             else:
                 last_coord, _, _ = group[-1]
                 distance_km = geodesic(last_coord, coord).km
+                st.write(f"Distance from {last_coord} to {coord}: {distance_km} km")
                 if distance_km < max_distance_km and len(group) < max_cases_per_slot:
                     group.append(case)
                 else:
@@ -142,17 +167,31 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
                     if exceeds_end_hour(current_time, group_time):
                         current_time = move_to_next_day(current_time)
                     group_end = current_time + group_time
+                    st.write(f"Assigning group timeslot: Start {current_time}, End {group_end}")
                     timeslots.append((group, current_time, group_end.strftime("%H:%M")))
                     prev_group_end_time = group_end
                     prev_group_last_coord = group[-1][0]
                     current_time = group_end
                     group = [case]
 
+                    # Calculate travel time after finalizing previous group and starting new group
+                    if prev_group_end_time is not None:
+                        travel_time_min = calculate_travel_time_km(prev_group_last_coord, coord)
+                        rounded_travel_time = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
+                        new_start_time = prev_group_end_time + rounded_travel_time
+                        if exceeds_end_hour(new_start_time, timedelta()):
+                            new_start_time = move_to_next_day(new_start_time)
+                        current_time = new_start_time
+                    
+                    if exceeds_end_hour(current_time, group_time):
+                        current_time = move_to_next_day(current_time)
+
     if group:
         current_time = find_next_available_time(current_time, group_time, blocked_slots, end_hour)
         if exceeds_end_hour(current_time, group_time):
             current_time = move_to_next_day(current_time)
         group_end = current_time + group_time
+        st.write(f"Assigning final group timeslot: Start {current_time}, End {group_end}")
         timeslots.append((group, current_time, group_end.strftime("%H:%M")))
 
     result_timeslots = []
@@ -184,8 +223,10 @@ st.title("📍 Route Optimizer with Time Slots")
 # Add blocked time slots input
 st.sidebar.header("⏰ Blocked Time Slots")
 blocked_times = st.sidebar.text_input(
-    "Enter blocked time slots (format: '9:30 - 10:30, 13:00 - 16:30')",
-    help="Enter time ranges when inspectors are not available"
+    "Enter blocked time slots (format: '26/04/2025 9:30 - 10:30, 30/04/2025 13:00 - 16:30')",
+    help="Input Lunch Breaks, Leaves, Holiday, Appoinment. If whole day is blocked, use 'dd/mm/yyyy 9:00 - 18:00'."
+    " Use comma to separate multiple time slots. Example: '26/04/2025 9:30 - 10:30, 30/04/2025 13:00 - 16:30'"
+    " (24-hour format)."
 )
 
 if blocked_times:

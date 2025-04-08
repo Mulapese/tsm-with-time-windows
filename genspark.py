@@ -1,3 +1,8 @@
+# Not working with only open cases: Sorted by order of open cases
+# Have bugs with cases have both open and resolved cases:
+# - Wrong date in timeslot for next case after resolved case
+# Good:
+# - Route recalculated when resolved cases are detected
 import streamlit as st
 import folium
 from folium.plugins import Draw
@@ -60,15 +65,9 @@ def find_shortest_path(coords, startCoords):
 
 
 def calculate_travel_time_km(coord1, coord2):
-    # Calculate travel time in minutes based on coordinates
-    # Using 10 minutes per km as a baseline rate
-    distance_km = geodesic(coord1, coord2).km
-    travel_time_minutes = distance_km * 10  # 10 minutes per km
-    
-    # Round up to nearest 30 minute increment
-    rounded_minutes = math.ceil(travel_time_minutes / 30) * 30
-    
-    return rounded_minutes
+    # Assume this function returns travel time in minutes based on coordinates
+    # Placeholder for actual implementation
+    return geodesic(coord1, coord2).km * 10  # Example: 10 minutes per km
 
 def parse_holidays(holidays_str):
     if not holidays_str:
@@ -89,7 +88,7 @@ def add_working_days(start_date, days, holidays_set):
             days -= 1
     return current
 
-def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times, resolved_cases=[], blocked_slots=None, holidays_set=None, current_date=datetime.now().date(), start_hour=9, end_hour=18, max_distance_km=1, max_cases_per_slot=3, skip_working_days_addition=False):
+def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times, resolved_cases=[], blocked_slots=None, holidays_set=None, current_date=datetime.now().date(), start_hour=9, end_hour=18, max_distance_km=1, max_cases_per_slot=3):
     """
     Assign timeslots for inspection cases along a route, considering travel time, blocked slots, and holidays.
     
@@ -104,7 +103,6 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
     - end_hour: Hour of the day by which inspections must end.
     - max_distance_km: Maximum allowed distance between consecutive cases to group them.
     - max_cases_per_slot: Maximum number of cases allowed in a single timeslot group.
-    - skip_working_days_addition: If True, skip adding 2 working days to the start date.
     
     Returns:
     - A list of tuples (coordinate, postal, timeslot_str) where timeslot_str is formatted as "(dd/mm, HH:MM - HH:MM)".
@@ -118,13 +116,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
         blocked_slots = []
         
     timeslots = []
-    if skip_working_days_addition:
-        start_date = current_date
-        st.session_state.logs.append(f"Skipping 2 working days addition, using date: {start_date}")
-    else:
-        start_date = add_working_days(current_date, 2, holidays_set)
-        st.session_state.logs.append(f"Adding 2 working days, resulting date: {start_date}")
-    
+    start_date = add_working_days(current_date, 2, holidays_set)
     base_time = datetime.combine(start_date, time(start_hour, 0))
     current_time = base_time
     group = []
@@ -173,7 +165,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
 
             if prev_group_end_time is not None:
                 travel_time_min = calculate_travel_time_km(prev_group_last_coord, coord)
-                rounded_travel_time = timedelta(minutes=travel_time_min)
+                rounded_travel_time = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                 new_start_time = prev_group_end_time + rounded_travel_time
                 current_time = find_next_available_time(new_start_time, timedelta(hours=inspection_time), blocked_slots, end_hour)
                 if exceeds_end_hour(current_time, timedelta()):
@@ -195,7 +187,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
             if not group:
                 if prev_group_end_time is not None:
                     travel_time_min = calculate_travel_time_km(prev_group_last_coord, coord)
-                    rounded_travel_time = timedelta(minutes=travel_time_min)
+                    rounded_travel_time = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                     new_start_time = prev_group_end_time + rounded_travel_time
                     current_time = find_next_available_time(new_start_time, group_time, blocked_slots, end_hour)
                     if exceeds_end_hour(current_time, timedelta()):
@@ -226,7 +218,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
                     # Calculate travel time after finalizing previous group and starting new group
                     if prev_group_end_time is not None:
                         travel_time_min = calculate_travel_time_km(prev_group_last_coord, coord)
-                        rounded_travel_time = timedelta(minutes=travel_time_min)
+                        rounded_travel_time = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                         new_start_time = prev_group_end_time + rounded_travel_time
                         if exceeds_end_hour(new_start_time, timedelta()):
                             new_start_time = move_to_next_day(new_start_time)
@@ -253,7 +245,7 @@ def assign_timeslots_stable_with_travel_time(route_with_postal, inspection_times
     return result_timeslots
 
 def parse_resolved_case_timeslot(timeslot_str):
-    """Parse a timeslot string like '11/04/2025 11:00 - 12:00' into datetime objects"""
+    """Parse a timeslot string like '14/04/2025 11:00 - 12:00' into datetime objects"""
     try:
         date_part, time_part = timeslot_str.split(" ", 1)
         start_time_str, end_time_str = time_part.split(" - ")
@@ -269,17 +261,6 @@ def parse_resolved_case_timeslot(timeslot_str):
     except Exception as e:
         st.session_state.logs.append(f"Error parsing timeslot '{timeslot_str}': {e}")
         return None, None
-
-def can_group_with_resolved_case(open_case_coord, resolved_case_coord, open_case_duration, resolved_case_duration, max_cases_in_slot=3):
-    """Check if an open case can be grouped with a resolved case based on proximity and duration."""
-    # Only group cases if both have exactly 1-hour duration
-    if open_case_duration != 1 or resolved_case_duration != 1:
-        return False
-    
-    # Check distance
-    distance_km = geodesic(open_case_coord, resolved_case_coord).km
-    # Check if open case is within 1km of the resolved case
-    return distance_km < 1.0
 
 def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_times, resolved_cases, blocked_slots=None, 
                                          holidays_set=None, current_date=datetime.now().date(), 
@@ -307,68 +288,32 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     if blocked_slots is None:
         blocked_slots = []
     
-    # If no resolved cases, use shortest path algorithm for open cases
+    # If no resolved cases, fall back to the existing algorithm
     if not resolved_cases:
-        st.session_state.logs.append("No resolved cases, using shortest path algorithm for open cases")
-        
-        # Check if we have open cases
-        if open_cases_with_postal:
-            # Extract coordinates for routing
-            coords_only = [case[0] for case in open_cases_with_postal]
-            
-            # Start with the first case by default
-            start_coord = coords_only[0]
-            
-            # Find optimal route using shortest path
-            optimal_route = find_shortest_path(coords_only, start_coord)
-            
-            # Create a mapping from coordinates to the full case info
-            coord_to_case = {case[0]: case for case in open_cases_with_postal}
-            
-            # Reorder open cases and inspection times based on the optimal route
-            reordered_open_cases = [coord_to_case[coord] for coord in optimal_route]
-            reordered_inspection_times = []
-            
-            # Create a mapping from original coordinates to inspection times
-            coord_to_time = {open_cases_with_postal[i][0]: inspection_times[i] for i in range(len(open_cases_with_postal))}
-            
-            # Reorder inspection times to match the new route order
-            for case in reordered_open_cases:
-                reordered_inspection_times.append(coord_to_time[case[0]])
-            
-            st.session_state.logs.append(f"Reordered {len(reordered_open_cases)} open cases using shortest path algorithm")
-            
-            return assign_timeslots_stable_with_travel_time(
-                route_with_postal=reordered_open_cases,
-                inspection_times=reordered_inspection_times,
-                resolved_cases=[],
-                blocked_slots=blocked_slots,
-                holidays_set=holidays_set,
-                current_date=current_date,
-                start_hour=start_hour,
-                end_hour=end_hour,
-                max_distance_km=max_distance_km,
-                max_cases_per_slot=max_cases_per_slot,
-                skip_working_days_addition=False  # Apply the default 2 working days for initial scheduling
-            )
-        else:
-            # If no open cases, just return an empty list
-            return []
+        st.session_state.logs.append("No resolved cases, falling back to original algorithm")
+        return assign_timeslots_stable_with_travel_time(
+            route_with_postal=open_cases_with_postal,
+            inspection_times=inspection_times,
+            resolved_cases=[],
+            blocked_slots=blocked_slots,
+            holidays_set=holidays_set,
+            current_date=current_date,
+            start_hour=start_hour,
+            end_hour=end_hour,
+            max_distance_km=max_distance_km,
+            max_cases_per_slot=max_cases_per_slot
+        )
     
     # Parse resolved cases to get datetime objects
     parsed_resolved_cases = []
     for case in resolved_cases:
         start_dt, end_dt = parse_resolved_case_timeslot(case["timeslot"])
         if start_dt and end_dt:
-            # Calculate the duration in hours
-            duration_hours = (end_dt - start_dt).total_seconds() / 3600
             parsed_resolved_cases.append({
                 "case_id": case["case_id"],
                 "location": case["location"],
                 "start_time": start_dt,
-                "end_time": end_dt,
-                "grouped_cases": 1,  # Initialize counter for cases in this slot
-                "duration": duration_hours  # Add duration information
+                "end_time": end_dt
             })
     
     # Sort resolved cases by start_time
@@ -390,23 +335,6 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     integrated_route = []
     remaining_open_cases = list(open_cases_with_postal)
     inspection_times_map = {open_cases_with_postal[i][0]: inspection_times[i] for i in range(len(open_cases_with_postal))}
-    
-    # First, identify open cases that can be grouped with resolved cases
-    open_cases_to_group = []
-    for i, (open_coord, open_postal) in enumerate(remaining_open_cases):
-        inspection_time = inspection_times_map[open_coord]
-        # Only consider open cases with 1-hour inspection time for grouping
-        for resolved_case in parsed_resolved_cases:
-            resolved_coord = resolved_case["location"]
-            resolved_duration = resolved_case["duration"]
-            
-            # Check if can be grouped based on proximity, duration, and available slots
-            if (can_group_with_resolved_case(open_coord, resolved_coord, inspection_time, resolved_duration) and 
-                resolved_case["grouped_cases"] < max_cases_per_slot):
-                open_cases_to_group.append((i, open_coord, open_postal, resolved_case))
-                resolved_case["grouped_cases"] += 1
-                st.session_state.logs.append(f"Grouping open case {open_postal} with resolved case {resolved_case['case_id']}")
-                break  # Once grouped with a resolved case, don't try to group with others
     
     # Helper function to get key value for sorting slots
     def get_slot_time(slot_tuple):
@@ -443,20 +371,10 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
         end_time = start_time + duration
         return end_time.hour > end_hour or (end_time.hour == end_hour and end_time.minute > 0)
     
-    # Add resolved cases and their grouped open cases to the final result
+    # Add resolved cases to the final result first
     for resolved_case in parsed_resolved_cases:
         time_slot = f"({resolved_case['start_time'].strftime('%d/%m, %H:%M')} - {resolved_case['end_time'].strftime('%H:%M')})"
         final_result.append((resolved_case["location"], resolved_case["case_id"], time_slot))
-        
-        # Add any open cases grouped with this resolved case
-        for i, open_coord, open_postal, rc in open_cases_to_group:
-            if rc["case_id"] == resolved_case["case_id"]:
-                final_result.append((open_coord, open_postal, time_slot))
-                # Mark for removal from remaining open cases
-                remaining_open_cases[i] = None
-    
-    # Remove grouped cases from remaining_open_cases
-    remaining_open_cases = [case for case in remaining_open_cases if case is not None]
     
     # If there are open cases to schedule
     if remaining_open_cases:
@@ -490,144 +408,43 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                 can_fit_more = True
                 cases_that_fit = []
                 
-                # Initialize grouping variables
-                current_group = []
-                current_group_distance = 0
-                group_time = timedelta(hours=1)  # Standard 1-hour slot for grouped cases
-                
                 for case in ordered_cases:
                     if not can_fit_more:
                         break
                         
-                    inspection_time = inspection_times_map[case[0]]
+                    # Calculate travel time from previous location
+                    travel_time_min = calculate_travel_time_km(last_location, case[0])
+                    travel_duration = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                     
-                    # If inspection time > 1, handle as individual appointment
-                    if inspection_time > 1:
-                        # If we have a pending group, schedule it first
-                        if current_group:
-                            # Find suitable time for the group
-                            travel_time_min = calculate_travel_time_km(last_location, current_group[0][0])
-                            travel_duration = timedelta(minutes=travel_time_min)
-                            earliest_group_start = find_earliest_start_time(current_time + travel_duration, 
-                                                                           group_time, 
-                                                                           blocked_slots)
-                            group_end_time = earliest_group_start + group_time
-                            
-                            # Check if group still fits before next resolved case
-                            travel_to_next = calculate_travel_time_km(current_group[-1][0], first_resolved["location"])
-                            travel_duration = timedelta(minutes=travel_to_next)
-                            
-                            if group_end_time + travel_duration <= first_resolved["start_time"]:
-                                time_slot = f"({earliest_group_start.strftime('%d/%m, %H:%M')} - {group_end_time.strftime('%H:%M')})"
-                                for group_case in current_group:
-                                    cases_that_fit.append((group_case[0], group_case[1], time_slot))
-                                    open_cases_before.append(group_case)
-                                
-                                current_time = group_end_time
-                                last_location = current_group[-1][0]
-                            else:
-                                can_fit_more = False
-                                break
-                        
-                            # Reset group
-                            current_group = []
-                            current_group_distance = 0
-                        
-                        # Calculate travel time from previous location
-                        travel_time_min = calculate_travel_time_km(last_location, case[0])
-                        travel_duration = timedelta(minutes=travel_time_min)
-                        
-                        # Calculate earliest possible start for this case
-                        earliest_start = current_time + travel_duration
-                        earliest_start = find_earliest_start_time(earliest_start, 
-                                                                timedelta(hours=inspection_time), 
-                                                                blocked_slots)
-                        
-                        # Calculate end time
-                        end_time = earliest_start + timedelta(hours=inspection_time)
-                        
-                        # Calculate travel time to next resolved
-                        travel_to_next = calculate_travel_time_km(case[0], first_resolved["location"])
-                        travel_to_next_duration = timedelta(minutes=travel_to_next)
-                        
-                        # Check if we can still fit this
-                        if end_time + travel_to_next_duration <= first_resolved["start_time"]:
-                            time_slot = f"({earliest_start.strftime('%d/%m, %H:%M')} - {end_time.strftime('%H:%M')})"
-                            cases_that_fit.append((case[0], case[1], time_slot))
-                            open_cases_before.append(case)
-                            current_time = end_time
-                            last_location = case[0]
-                        else:
-                            can_fit_more = False
+                    # Calculate earliest possible start for this case
+                    earliest_start = last_end_time + travel_duration
+                    earliest_start = find_earliest_start_time(earliest_start, 
+                                                             timedelta(hours=inspection_times_map[case[0]]), 
+                                                             blocked_slots)
+                    
+                    # Calculate end time
+                    end_time = earliest_start + timedelta(hours=inspection_times_map[case[0]])
+                    
+                    # Check if we can still fit this before first resolved case
+                    # We need to allow travel time to the resolved case as well
+                    travel_to_resolved = calculate_travel_time_km(case[0], first_resolved["location"])
+                    travel_to_resolved_duration = timedelta(minutes=math.ceil(travel_to_resolved / 30) * 30)
+                    
+                    if end_time + travel_to_resolved_duration <= first_resolved["start_time"]:
+                        time_slot = f"({earliest_start.strftime('%d/%m, %H:%M')} - {end_time.strftime('%H:%M')})"
+                        cases_that_fit.append((case[0], case[1], time_slot))
+                        open_cases_before.append(case)
+                        last_end_time = end_time
+                        last_location = case[0]
                     else:
-                        # Handle 1-hour cases with grouping
-                        if not current_group:
-                            # Start a new group
-                            current_group.append(case)
-                            current_group_distance = 0
-                        else:
-                            # Check if this case can be added to current group
-                            last_case_in_group = current_group[-1]
-                            distance_km = geodesic(last_case_in_group[0], case[0]).km
-                            
-                            if distance_km < max_distance_km and len(current_group) < max_cases_per_slot:
-                                # Add to current group
-                                current_group.append(case)
-                                current_group_distance = max(current_group_distance, distance_km)
-                            else:
-                                # Current group is full or too spread out, schedule it
-                                travel_time_min = calculate_travel_time_km(last_location, current_group[0][0])
-                                travel_duration = timedelta(minutes=travel_time_min)
-                                earliest_group_start = find_earliest_start_time(current_time + travel_duration, 
-                                                                              group_time, 
-                                                                              blocked_slots)
-                                group_end_time = earliest_group_start + group_time
-                                
-                                # Check if group still fits before next resolved case
-                                travel_to_next = calculate_travel_time_km(current_group[-1][0], first_resolved["location"])
-                                travel_duration = timedelta(minutes=travel_to_next)
-                                
-                                if group_end_time + travel_duration <= first_resolved["start_time"]:
-                                    time_slot = f"({earliest_group_start.strftime('%d/%m, %H:%M')} - {group_end_time.strftime('%H:%M')})"
-                                    for group_case in current_group:
-                                        cases_that_fit.append((group_case[0], group_case[1], time_slot))
-                                        open_cases_before.append(group_case)
-                                    
-                                    current_time = group_end_time
-                                    last_location = current_group[-1][0]
-                                    
-                                    # Start a new group with current case
-                                    current_group = [case]
-                                    current_group_distance = 0
-                                else:
-                                    break
-                
-                # Don't forget to schedule the last group if there is one
-                if current_group:
-                    travel_time_min = calculate_travel_time_km(last_location, current_group[0][0])
-                    travel_duration = timedelta(minutes=travel_time_min)
-                    earliest_group_start = find_earliest_start_time(current_time + travel_duration, 
-                                                                  group_time, 
-                                                                  blocked_slots)
-                    group_end_time = earliest_group_start + group_time
-                    
-                    # Check if group still fits before next resolved case
-                    travel_to_next = calculate_travel_time_km(current_group[-1][0], first_resolved["location"])
-                    travel_duration = timedelta(minutes=travel_to_next)
-                    
-                    if group_end_time + travel_duration <= first_resolved["start_time"]:
-                        time_slot = f"({earliest_group_start.strftime('%d/%m, %H:%M')} - {group_end_time.strftime('%H:%M')})"
-                        for group_case in current_group:
-                            cases_that_fit.append((group_case[0], group_case[1], time_slot))
-                            open_cases_before.append(group_case)
+                        can_fit_more = False
                 
                 # Add all cases that fit to final result
                 final_result.extend(cases_that_fit)
                 
                 # Remove scheduled cases from remaining
                 for case in open_cases_before:
-                    if case in remaining_open_cases:  # Check if case still exists in remaining_open_cases
-                        remaining_open_cases.remove(case)
+                    remaining_open_cases.remove(case)
         
         # 2. Schedule cases between resolved cases
         for i in range(len(parsed_resolved_cases) - 1):
@@ -650,9 +467,9 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                     travel_to_next = calculate_travel_time_km(case[0], end_coord)
                     inspection_duration = timedelta(hours=inspection_times_map[case[0]])
                     
-                    min_required_time = (timedelta(minutes=travel_from_current) + 
+                    min_required_time = (timedelta(minutes=math.ceil(travel_from_current / 30) * 30) + 
                                          inspection_duration + 
-                                         timedelta(minutes=travel_to_next))
+                                         timedelta(minutes=math.ceil(travel_to_next / 30) * 30))
                     
                     if available_start + min_required_time <= available_end:
                         potential_cases.append(case)
@@ -676,136 +493,37 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                     current_time = available_start
                     last_location = start_coord
                     
-                    # Initialize grouping variables
-                    current_group = []
-                    current_group_distance = 0
-                    group_time = timedelta(hours=1)  # Standard 1-hour slot for grouped cases
-                    
                     for case in ordered_cases:
-                        inspection_time = inspection_times_map[case[0]]
+                        # Calculate travel time from previous location
+                        travel_time_min = calculate_travel_time_km(last_location, case[0])
+                        travel_duration = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
                         
-                        # If inspection time > 1, handle as individual appointment
-                        if inspection_time > 1:
-                            # If we have a pending group, schedule it first
-                            if current_group:
-                                # Find suitable time for the group
-                                travel_time_min = calculate_travel_time_km(last_location, current_group[0][0])
-                                travel_duration = timedelta(minutes=travel_time_min)
-                                earliest_group_start = find_earliest_start_time(current_time + travel_duration, 
-                                                                               group_time, 
-                                                                               blocked_slots)
-                                group_end_time = earliest_group_start + group_time
-                                
-                                # Check if group still fits before next resolved case
-                                travel_to_next = calculate_travel_time_km(current_group[-1][0], end_coord)
-                                travel_duration = timedelta(minutes=travel_to_next)
-                                
-                                if group_end_time + travel_duration <= available_end:
-                                    time_slot = f"({earliest_group_start.strftime('%d/%m, %H:%M')} - {group_end_time.strftime('%H:%M')})"
-                                    for group_case in current_group:
-                                        final_result.append((group_case[0], group_case[1], time_slot))
-                                        cases_between.append(group_case)
-                                    
-                                    current_time = group_end_time
-                                    last_location = current_group[-1][0]
-                                else:
-                                    break
-                                
-                                # Reset group
-                                current_group = []
-                                current_group_distance = 0
-                            
-                            # Calculate travel time from previous location
-                            travel_time_min = calculate_travel_time_km(last_location, case[0])
-                            travel_duration = timedelta(minutes=travel_time_min)
-                            
-                            # Calculate earliest possible start for this case
-                            earliest_start = current_time + travel_duration
-                            earliest_start = find_earliest_start_time(earliest_start, 
-                                                                    timedelta(hours=inspection_time), 
-                                                                    blocked_slots)
-                            
-                            # Calculate end time
-                            end_time = earliest_start + timedelta(hours=inspection_time)
-                            
-                            # Calculate travel time to next resolved
-                            travel_to_next = calculate_travel_time_km(case[0], end_coord)
-                            travel_to_next_duration = timedelta(minutes=travel_to_next)
-                            
-                            # Check if we can still fit this
-                            if end_time + travel_to_next_duration <= available_end:
-                                time_slot = f"({earliest_start.strftime('%d/%m, %H:%M')} - {end_time.strftime('%H:%M')})"
-                                final_result.append((case[0], case[1], time_slot))
-                                cases_between.append(case)
-                                current_time = end_time
-                                last_location = case[0]
-                            else:
-                                break
+                        # Calculate earliest possible start
+                        earliest_start = current_time + travel_duration
+                        earliest_start = find_earliest_start_time(earliest_start, 
+                                                                timedelta(hours=inspection_times_map[case[0]]), 
+                                                                blocked_slots)
+                        
+                        # Calculate end time
+                        end_time = earliest_start + timedelta(hours=inspection_times_map[case[0]])
+                        
+                        # Calculate travel time to next resolved
+                        travel_to_next = calculate_travel_time_km(case[0], end_coord)
+                        travel_to_next_duration = timedelta(minutes=math.ceil(travel_to_next / 30) * 30)
+                        
+                        # Check if we can still fit this
+                        if end_time + travel_to_next_duration <= available_end:
+                            time_slot = f"({earliest_start.strftime('%d/%m, %H:%M')} - {end_time.strftime('%H:%M')})"
+                            final_result.append((case[0], case[1], time_slot))
+                            cases_between.append(case)
+                            current_time = end_time
+                            last_location = case[0]
                         else:
-                            # Handle 1-hour cases with grouping
-                            if not current_group:
-                                # Start a new group
-                                current_group.append(case)
-                                current_group_distance = 0
-                            else:
-                                # Check if this case can be added to current group
-                                last_case_in_group = current_group[-1]
-                                distance_km = geodesic(last_case_in_group[0], case[0]).km
-                                
-                                if distance_km < max_distance_km and len(current_group) < max_cases_per_slot:
-                                    # Add to current group
-                                    current_group.append(case)
-                                    current_group_distance = max(current_group_distance, distance_km)
-                                else:
-                                    # Current group is full or too spread out, schedule it
-                                    travel_time_min = calculate_travel_time_km(last_location, current_group[0][0])
-                                    travel_duration = timedelta(minutes=travel_time_min)
-                                    earliest_group_start = find_earliest_start_time(current_time + travel_duration, 
-                                                                                  group_time, 
-                                                                                  blocked_slots)
-                                    group_end_time = earliest_group_start + group_time
-                                    
-                                    # Check if group still fits before next resolved case
-                                    travel_to_next = calculate_travel_time_km(current_group[-1][0], end_coord)
-                                    travel_duration = timedelta(minutes=travel_to_next)
-                                    
-                                    if group_end_time + travel_duration <= available_end:
-                                        time_slot = f"({earliest_group_start.strftime('%d/%m, %H:%M')} - {group_end_time.strftime('%H:%M')})"
-                                        for group_case in current_group:
-                                            final_result.append((group_case[0], group_case[1], time_slot))
-                                            cases_between.append(group_case)
-                                        
-                                        current_time = group_end_time
-                                        last_location = current_group[-1][0]
-                                        
-                                        # Start a new group with current case
-                                        current_group = [case]
-                                        current_group_distance = 0
-                                    else:
-                                        break
-                    
-                    # Don't forget to schedule the last group if there is one
-                    if current_group:
-                        travel_time_min = calculate_travel_time_km(last_location, current_group[0][0])
-                        travel_duration = timedelta(minutes=travel_time_min)
-                        earliest_group_start = find_earliest_start_time(current_time + travel_duration, 
-                                                                      group_time, 
-                                                                      blocked_slots)
-                        group_end_time = earliest_group_start + group_time
-                        
-                        # Check if group still fits before next resolved case
-                        travel_to_next = calculate_travel_time_km(current_group[-1][0], end_coord)
-                        travel_duration = timedelta(minutes=travel_to_next)
-                        
-                        if group_end_time + travel_duration <= available_end:
-                            time_slot = f"({earliest_group_start.strftime('%d/%m, %H:%M')} - {group_end_time.strftime('%H:%M')})"
-                            for group_case in current_group:
-                                final_result.append((group_case[0], group_case[1], time_slot))
-                                cases_between.append(group_case)
+                            break
                     
                     # Remove scheduled cases from remaining
                     for case in cases_between:
-                        if case in remaining_open_cases:  # Check if case still exists in remaining_open_cases
+                        if case in remaining_open_cases:
                             remaining_open_cases.remove(case)
         
         # 3. Schedule cases after the last resolved case
@@ -813,7 +531,6 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             last_resolved = parsed_resolved_cases[-1]
             start_time = last_resolved["end_time"]
             start_coord = last_resolved["location"]
-            resolved_duration = last_resolved["duration"]
             
             # Find optimal route starting from last resolved case
             coords_only = [x[0] for x in remaining_open_cases]
@@ -824,114 +541,71 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             coord_to_case = {x[0]: x for x in remaining_open_cases}
             ordered_cases = [coord_to_case[coord] for coord in optimal_route]
             
-            # New logic: Check for open cases that are very close to the last resolved case
-            # and can be added to the same slot (if both have 1-hour duration)
-            cases_to_group_with_last = []
-            cases_for_new_slots = []
+            # Now use the existing algorithm to schedule these cases, but starting after the last resolved case
+            route_with_postal = [(case[0], case[1]) for case in ordered_cases]
+            inspection_times_for_remaining = [inspection_times_map[case[0]] for case in ordered_cases]
             
-            for case in ordered_cases:
-                inspection_time = inspection_times_map[case[0]]
-                
-                # Check if can be grouped based on proximity, duration, and available slots
-                if (can_group_with_resolved_case(case[0], start_coord, inspection_time, resolved_duration) and 
-                    last_resolved["grouped_cases"] < max_cases_per_slot):
-                    cases_to_group_with_last.append(case)
-                    last_resolved["grouped_cases"] += 1
-                    st.session_state.logs.append(f"Grouping case {case[1]} with last resolved case {last_resolved['case_id']}")
-                else:
-                    cases_for_new_slots.append(case)
+            # Create modified blocked slots list to account for resolved cases
+            combined_blocked = blocked_slots.copy()
+            for rc in parsed_resolved_cases:
+                combined_blocked.append((rc["start_time"], rc["end_time"]))
             
-            # Add grouped cases to final result with same timeslot as last resolved
-            last_resolved_timeslot = f"({last_resolved['start_time'].strftime('%d/%m, %H:%M')} - {last_resolved['end_time'].strftime('%H:%M')})"
-            for case in cases_to_group_with_last:
-                final_result.append((case[0], case[1], last_resolved_timeslot))
-                remaining_open_cases.remove(case)  # Remove from remaining cases
+            # Use the existing algorithm, but force the start time to be after the last resolved case
+            current_time = start_time
             
-            # Now use the existing algorithm for the rest
-            if cases_for_new_slots:
-                route_with_postal = [(case[0], case[1]) for case in cases_for_new_slots]
-                inspection_times_for_remaining = [inspection_times_map[case[0]] for case in cases_for_new_slots]
-                
-                # Create modified blocked slots list to account for resolved cases
-                combined_blocked = blocked_slots.copy()
-                for rc in parsed_resolved_cases:
-                    combined_blocked.append((rc["start_time"], rc["end_time"]))
-                
-                # Use the existing algorithm, but force the start time to be after the last resolved case
-                current_time = start_time
-                
-                # Calculate travel time from last resolved to first case
-                if cases_for_new_slots:
-                    travel_time_min = calculate_travel_time_km(start_coord, cases_for_new_slots[0][0])
-                    travel_duration = timedelta(minutes=travel_time_min)
-                    current_time += travel_duration
-                
-                # Find next available slot after this time
-                first_available = find_earliest_start_time(current_time, timedelta(minutes=30), combined_blocked)
-                
-                # If we've moved to next day, use the standard start hour
-                if first_available.date() > current_time.date():
-                    pass  # The find_earliest_start_time function already handles this
-                
-                # Adjust the date to ensure we're starting after the resolved case
-                remaining_slots = assign_timeslots_stable_with_travel_time(
-                    route_with_postal=route_with_postal,
-                    inspection_times=inspection_times_for_remaining,
-                    resolved_cases=[],
-                    blocked_slots=combined_blocked,
-                    holidays_set=holidays_set,
-                    current_date=first_available.date(),  # Use the date after last resolved
-                    start_hour=first_available.hour,  # Use the hour after travel from last resolved
-                    end_hour=end_hour,
-                    max_distance_km=max_distance_km,
-                    max_cases_per_slot=max_cases_per_slot,
-                    skip_working_days_addition=True  # Skip adding 2 working days since we're continuing from a resolved case
-                )
-                
-                final_result.extend(remaining_slots)
+            # Calculate travel time from last resolved to first case
+            if ordered_cases:
+                travel_time_min = calculate_travel_time_km(start_coord, ordered_cases[0][0])
+                travel_duration = timedelta(minutes=math.ceil(travel_time_min / 30) * 30)
+                current_time += travel_duration
+            
+            # Find next available slot after this time
+            first_available = find_earliest_start_time(current_time, timedelta(hours=1), combined_blocked)
+            
+            # If we've moved to next day, use the standard start hour
+            if first_available.date() > current_time.date():
+                pass  # The find_earliest_start_time function already handles this
+            
+            # Adjust the date to ensure we're starting after the resolved case
+            remaining_slots = assign_timeslots_stable_with_travel_time(
+                route_with_postal=route_with_postal,
+                inspection_times=inspection_times_for_remaining,
+                resolved_cases=[],
+                blocked_slots=combined_blocked,
+                holidays_set=holidays_set,
+                current_date=first_available.date(),  # Use the date after last resolved
+                start_hour=first_available.hour,  # Use the hour after travel from last resolved
+                end_hour=end_hour,
+                max_distance_km=max_distance_km,
+                max_cases_per_slot=max_cases_per_slot
+            )
+            
+            final_result.extend(remaining_slots)
         # Handle case where no resolved cases exist or all open cases still need scheduling
         if not parsed_resolved_cases or (len(remaining_open_cases) == len(open_cases_with_postal)):
             # Use original algorithm for remaining cases
             st.session_state.logs.append(f"Scheduling {len(remaining_open_cases)} remaining open cases with original algorithm")
             
-            # For unscheduled open cases, use shortest path algorithm
-            if remaining_open_cases:
-                # Extract coordinates for routing
-                coords_only = [case[0] for case in remaining_open_cases]
-                
-                # Start with the first case by default
-                start_coord = coords_only[0]
-                
-                # Find optimal route using shortest path
-                optimal_route = find_shortest_path(coords_only, start_coord)
-                
-                # Create a mapping from coordinates to the full case info
-                coord_to_case = {case[0]: case for case in remaining_open_cases}
-                
-                # Reorder remaining open cases based on the optimal route
-                reordered_open_cases = [coord_to_case[coord] for coord in optimal_route]
-                reordered_inspection_times = [inspection_times_map[case[0]] for case in reordered_open_cases]
-                
-                st.session_state.logs.append(f"Reordered {len(reordered_open_cases)} remaining open cases using shortest path algorithm")
-                
-                remaining_slots = assign_timeslots_stable_with_travel_time(
-                    route_with_postal=reordered_open_cases,
-                    inspection_times=reordered_inspection_times,
-                    resolved_cases=[],
-                    blocked_slots=blocked_slots,
-                    holidays_set=holidays_set,
-                    current_date=current_date,
-                    start_hour=start_hour,
-                    end_hour=end_hour,
-                    max_distance_km=max_distance_km,
-                    max_cases_per_slot=max_cases_per_slot,
-                    skip_working_days_addition=False  # Apply the default 2 working days for initial scheduling
-                )
-                
-                # Add these to the final result
-                for slot in remaining_slots:
-                    if slot not in final_result:
-                        final_result.append(slot)
+            route_with_postal = remaining_open_cases
+            inspection_times_for_remaining = [inspection_times_map[case[0]] for case in remaining_open_cases]
+            
+            remaining_slots = assign_timeslots_stable_with_travel_time(
+                route_with_postal=route_with_postal,
+                inspection_times=inspection_times_for_remaining,
+                resolved_cases=[],
+                blocked_slots=blocked_slots,
+                holidays_set=holidays_set,
+                current_date=current_date,
+                start_hour=start_hour,
+                end_hour=end_hour,
+                max_distance_km=max_distance_km,
+                max_cases_per_slot=max_cases_per_slot
+            )
+            
+            # Add these to the final result
+            for slot in remaining_slots:
+                if slot not in final_result:
+                    final_result.append(slot)
     
     # Sort the final result by timeslot
     final_result.sort(key=get_slot_time)
@@ -1013,7 +687,6 @@ st.sidebar.write("Current Date:", current_date.strftime("%d/%m/%Y"))
 st.session_state.blocked_slots = parse_blocked_times(blocked_times) if blocked_times else []
 st.session_state.holiday_set = parse_holidays(holidays_str) if holidays else set()
 
-
 # Add to the sidebar after the blocked times input
 st.sidebar.subheader("Resolved Cases")
 if st.session_state.resolved_cases:
@@ -1061,7 +734,6 @@ if st.session_state.open_cases:
 else:
     st.sidebar.text("No open cases yet")
 
-
 # Create the base map
 if st.session_state.route_data:
     # Show the route map if we have calculated a route (for open cases)
@@ -1084,7 +756,7 @@ if st.session_state.route_data:
     # Sort by timeslot for visualization (show chronological route)
     sorted_route = sorted(route_with_timeslot, key=get_timeslot_datetime)
     
-    # Draw markers for all cases first
+    # Draw markers and connections for all cases
     for i, (coord, postal, timeslot) in enumerate(sorted_route):
         # Determine marker color based on case type
         if postal.startswith("RC"):
@@ -1105,16 +777,11 @@ if st.session_state.route_data:
             )
         ).add_to(m)
     
-    # Draw route connections as a single path between consecutive points
+    # Draw route connections between points
     for i in range(len(sorted_route) - 1):
         c1, p1, _ = sorted_route[i]
         c2, p2, _ = sorted_route[i + 1]
         dist_km = geodesic(c1, c2).km
-        
-        # Calculate travel time with proper rounding to 30 min increments
-        travel_time_minutes = calculate_travel_time_km(c1, c2)
-        travel_time_hours = travel_time_minutes / 60
-        
         midpoint = ((c1[0] + c2[0]) / 2, (c1[1] + c2[1]) / 2)
         
         # Different line styles for different connections
@@ -1129,7 +796,7 @@ if st.session_state.route_data:
             folium.PolyLine([c1, c2], color="blue", weight=3).add_to(m)
         
         folium.Marker(midpoint, icon=folium.DivIcon(
-            html=f'<div style="font-size: 11px; color: black;">{dist_km:.2f} km<br>{travel_time_hours:.1f} hrs</div>'
+            html=f'<div style="font-size: 11px; color: black;">{dist_km:.2f} km</div>'
         )).add_to(m)
     
     # Add drawing tools (for manual modifications if needed)
@@ -1185,7 +852,7 @@ if st.session_state.pending_resolved:
     with st.expander("Enter Resolved Case Timeslot", expanded=True):
         timeslot_input = st.text_input(
             "Enter timeslot (e.g. '20/04/2025 09:00 - 10:00')", 
-            value="14/04/2025 11:00 - 12:00",  # Default value
+            value="11/04/2025 11:00 - 12:00",  # Default value
             help="Input timeslot for the resolved case."
         )
         if st.button("Submit Resolved Case"):
@@ -1310,7 +977,6 @@ if st.session_state.open_cases:
 if st.session_state.resolved_cases:
     st.subheader("Resolved Cases")
     for i, case in enumerate(st.session_state.resolved_cases):
-        loc = case["location"]
         loc = case["location"]
         ts = case["timeslot"]
         case_id = case["case_id"]

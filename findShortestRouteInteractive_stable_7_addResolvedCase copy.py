@@ -1,7 +1,3 @@
-# Works with open cases
-# Not working with resolved cases:
-# - Have bug wrong date time slot
-# - Route didn't recalculate when resolved cases are detected
 import streamlit as st
 import folium
 from folium.plugins import Draw

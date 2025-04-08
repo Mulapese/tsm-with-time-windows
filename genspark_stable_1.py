@@ -270,17 +270,6 @@ def parse_resolved_case_timeslot(timeslot_str):
         st.session_state.logs.append(f"Error parsing timeslot '{timeslot_str}': {e}")
         return None, None
 
-def can_group_with_resolved_case(open_case_coord, resolved_case_coord, open_case_duration, resolved_case_duration, max_cases_in_slot=3):
-    """Check if an open case can be grouped with a resolved case based on proximity and duration."""
-    # Only group cases if both have exactly 1-hour duration
-    if open_case_duration != 1 or resolved_case_duration != 1:
-        return False
-    
-    # Check distance
-    distance_km = geodesic(open_case_coord, resolved_case_coord).km
-    # Check if open case is within 1km of the resolved case
-    return distance_km < 1.0
-
 def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_times, resolved_cases, blocked_slots=None, 
                                          holidays_set=None, current_date=datetime.now().date(), 
                                          start_hour=9, end_hour=18, max_distance_km=1, max_cases_per_slot=3):
@@ -360,15 +349,11 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     for case in resolved_cases:
         start_dt, end_dt = parse_resolved_case_timeslot(case["timeslot"])
         if start_dt and end_dt:
-            # Calculate the duration in hours
-            duration_hours = (end_dt - start_dt).total_seconds() / 3600
             parsed_resolved_cases.append({
                 "case_id": case["case_id"],
                 "location": case["location"],
                 "start_time": start_dt,
-                "end_time": end_dt,
-                "grouped_cases": 1,  # Initialize counter for cases in this slot
-                "duration": duration_hours  # Add duration information
+                "end_time": end_dt
             })
     
     # Sort resolved cases by start_time
@@ -390,23 +375,6 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     integrated_route = []
     remaining_open_cases = list(open_cases_with_postal)
     inspection_times_map = {open_cases_with_postal[i][0]: inspection_times[i] for i in range(len(open_cases_with_postal))}
-    
-    # First, identify open cases that can be grouped with resolved cases
-    open_cases_to_group = []
-    for i, (open_coord, open_postal) in enumerate(remaining_open_cases):
-        inspection_time = inspection_times_map[open_coord]
-        # Only consider open cases with 1-hour inspection time for grouping
-        for resolved_case in parsed_resolved_cases:
-            resolved_coord = resolved_case["location"]
-            resolved_duration = resolved_case["duration"]
-            
-            # Check if can be grouped based on proximity, duration, and available slots
-            if (can_group_with_resolved_case(open_coord, resolved_coord, inspection_time, resolved_duration) and 
-                resolved_case["grouped_cases"] < max_cases_per_slot):
-                open_cases_to_group.append((i, open_coord, open_postal, resolved_case))
-                resolved_case["grouped_cases"] += 1
-                st.session_state.logs.append(f"Grouping open case {open_postal} with resolved case {resolved_case['case_id']}")
-                break  # Once grouped with a resolved case, don't try to group with others
     
     # Helper function to get key value for sorting slots
     def get_slot_time(slot_tuple):
@@ -443,20 +411,10 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
         end_time = start_time + duration
         return end_time.hour > end_hour or (end_time.hour == end_hour and end_time.minute > 0)
     
-    # Add resolved cases and their grouped open cases to the final result
+    # Add resolved cases to the final result first
     for resolved_case in parsed_resolved_cases:
         time_slot = f"({resolved_case['start_time'].strftime('%d/%m, %H:%M')} - {resolved_case['end_time'].strftime('%H:%M')})"
         final_result.append((resolved_case["location"], resolved_case["case_id"], time_slot))
-        
-        # Add any open cases grouped with this resolved case
-        for i, open_coord, open_postal, rc in open_cases_to_group:
-            if rc["case_id"] == resolved_case["case_id"]:
-                final_result.append((open_coord, open_postal, time_slot))
-                # Mark for removal from remaining open cases
-                remaining_open_cases[i] = None
-    
-    # Remove grouped cases from remaining_open_cases
-    remaining_open_cases = [case for case in remaining_open_cases if case is not None]
     
     # If there are open cases to schedule
     if remaining_open_cases:
@@ -626,8 +584,7 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                 
                 # Remove scheduled cases from remaining
                 for case in open_cases_before:
-                    if case in remaining_open_cases:  # Check if case still exists in remaining_open_cases
-                        remaining_open_cases.remove(case)
+                    remaining_open_cases.remove(case)
         
         # 2. Schedule cases between resolved cases
         for i in range(len(parsed_resolved_cases) - 1):
@@ -805,7 +762,7 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                     
                     # Remove scheduled cases from remaining
                     for case in cases_between:
-                        if case in remaining_open_cases:  # Check if case still exists in remaining_open_cases
+                        if case in remaining_open_cases:
                             remaining_open_cases.remove(case)
         
         # 3. Schedule cases after the last resolved case
@@ -813,7 +770,6 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             last_resolved = parsed_resolved_cases[-1]
             start_time = last_resolved["end_time"]
             start_coord = last_resolved["location"]
-            resolved_duration = last_resolved["duration"]
             
             # Find optimal route starting from last resolved case
             coords_only = [x[0] for x in remaining_open_cases]
@@ -824,71 +780,47 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             coord_to_case = {x[0]: x for x in remaining_open_cases}
             ordered_cases = [coord_to_case[coord] for coord in optimal_route]
             
-            # New logic: Check for open cases that are very close to the last resolved case
-            # and can be added to the same slot (if both have 1-hour duration)
-            cases_to_group_with_last = []
-            cases_for_new_slots = []
+            # Now use the existing algorithm to schedule these cases, but starting after the last resolved case
+            route_with_postal = [(case[0], case[1]) for case in ordered_cases]
+            inspection_times_for_remaining = [inspection_times_map[case[0]] for case in ordered_cases]
             
-            for case in ordered_cases:
-                inspection_time = inspection_times_map[case[0]]
-                
-                # Check if can be grouped based on proximity, duration, and available slots
-                if (can_group_with_resolved_case(case[0], start_coord, inspection_time, resolved_duration) and 
-                    last_resolved["grouped_cases"] < max_cases_per_slot):
-                    cases_to_group_with_last.append(case)
-                    last_resolved["grouped_cases"] += 1
-                    st.session_state.logs.append(f"Grouping case {case[1]} with last resolved case {last_resolved['case_id']}")
-                else:
-                    cases_for_new_slots.append(case)
+            # Create modified blocked slots list to account for resolved cases
+            combined_blocked = blocked_slots.copy()
+            for rc in parsed_resolved_cases:
+                combined_blocked.append((rc["start_time"], rc["end_time"]))
             
-            # Add grouped cases to final result with same timeslot as last resolved
-            last_resolved_timeslot = f"({last_resolved['start_time'].strftime('%d/%m, %H:%M')} - {last_resolved['end_time'].strftime('%H:%M')})"
-            for case in cases_to_group_with_last:
-                final_result.append((case[0], case[1], last_resolved_timeslot))
-                remaining_open_cases.remove(case)  # Remove from remaining cases
+            # Use the existing algorithm, but force the start time to be after the last resolved case
+            current_time = start_time
             
-            # Now use the existing algorithm for the rest
-            if cases_for_new_slots:
-                route_with_postal = [(case[0], case[1]) for case in cases_for_new_slots]
-                inspection_times_for_remaining = [inspection_times_map[case[0]] for case in cases_for_new_slots]
-                
-                # Create modified blocked slots list to account for resolved cases
-                combined_blocked = blocked_slots.copy()
-                for rc in parsed_resolved_cases:
-                    combined_blocked.append((rc["start_time"], rc["end_time"]))
-                
-                # Use the existing algorithm, but force the start time to be after the last resolved case
-                current_time = start_time
-                
-                # Calculate travel time from last resolved to first case
-                if cases_for_new_slots:
-                    travel_time_min = calculate_travel_time_km(start_coord, cases_for_new_slots[0][0])
-                    travel_duration = timedelta(minutes=travel_time_min)
-                    current_time += travel_duration
-                
-                # Find next available slot after this time
-                first_available = find_earliest_start_time(current_time, timedelta(minutes=30), combined_blocked)
-                
-                # If we've moved to next day, use the standard start hour
-                if first_available.date() > current_time.date():
-                    pass  # The find_earliest_start_time function already handles this
-                
-                # Adjust the date to ensure we're starting after the resolved case
-                remaining_slots = assign_timeslots_stable_with_travel_time(
-                    route_with_postal=route_with_postal,
-                    inspection_times=inspection_times_for_remaining,
-                    resolved_cases=[],
-                    blocked_slots=combined_blocked,
-                    holidays_set=holidays_set,
-                    current_date=first_available.date(),  # Use the date after last resolved
-                    start_hour=first_available.hour,  # Use the hour after travel from last resolved
-                    end_hour=end_hour,
-                    max_distance_km=max_distance_km,
-                    max_cases_per_slot=max_cases_per_slot,
-                    skip_working_days_addition=True  # Skip adding 2 working days since we're continuing from a resolved case
-                )
-                
-                final_result.extend(remaining_slots)
+            # Calculate travel time from last resolved to first case
+            if ordered_cases:
+                travel_time_min = calculate_travel_time_km(start_coord, ordered_cases[0][0])
+                travel_duration = timedelta(minutes=travel_time_min)
+                current_time += travel_duration
+            
+            # Find next available slot after this time
+            first_available = find_earliest_start_time(current_time, timedelta(minutes=30), combined_blocked)
+            
+            # If we've moved to next day, use the standard start hour
+            if first_available.date() > current_time.date():
+                pass  # The find_earliest_start_time function already handles this
+            
+            # Adjust the date to ensure we're starting after the resolved case
+            remaining_slots = assign_timeslots_stable_with_travel_time(
+                route_with_postal=route_with_postal,
+                inspection_times=inspection_times_for_remaining,
+                resolved_cases=[],
+                blocked_slots=combined_blocked,
+                holidays_set=holidays_set,
+                current_date=first_available.date(),  # Use the date after last resolved
+                start_hour=first_available.hour,  # Use the hour after travel from last resolved
+                end_hour=end_hour,
+                max_distance_km=max_distance_km,
+                max_cases_per_slot=max_cases_per_slot,
+                skip_working_days_addition=True  # Skip adding 2 working days since we're continuing from a resolved case
+            )
+            
+            final_result.extend(remaining_slots)
         # Handle case where no resolved cases exist or all open cases still need scheduling
         if not parsed_resolved_cases or (len(remaining_open_cases) == len(open_cases_with_postal)):
             # Use original algorithm for remaining cases
@@ -1310,7 +1242,6 @@ if st.session_state.open_cases:
 if st.session_state.resolved_cases:
     st.subheader("Resolved Cases")
     for i, case in enumerate(st.session_state.resolved_cases):
-        loc = case["location"]
         loc = case["location"]
         ts = case["timeslot"]
         case_id = case["case_id"]
