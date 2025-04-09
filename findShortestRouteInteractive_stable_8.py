@@ -292,14 +292,15 @@ def can_group_with_resolved_case(open_case_coord, resolved_case_coord, open_case
     st.session_state.logs.append(f"Can group based on distance: {result}")
     return result
 
-def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_times, resolved_cases, blocked_slots=None, 
+def assign_timeslots_with_resolved_cases(open_cases_with_case_id, inspection_times, resolved_cases, blocked_slots=None, 
                                          holidays_set=None, current_date=datetime.now().date(), 
-                                         start_hour=9, end_hour=18, max_distance_km=1, max_cases_per_slot=3):
+                                         start_hour=9, end_hour=18, max_distance_km=1, max_cases_per_slot=3,
+                                         valuer_home=[1.3521, 103.8198]):
     """
     Assign timeslots for open cases while respecting fixed resolved case timeslots.
     
     Parameters:
-    - open_cases_with_postal: List of tuples (coordinate, postal code) for open cases
+    - open_cases_with_case_id: List of tuples (coordinate, case_id) for open cases
     - inspection_times: List of inspection duration (in hours) corresponding to each open case
     - resolved_cases: List of dictionaries with resolved case information
     - blocked_slots: List of blocked time intervals (tuples of start and end datetime)
@@ -309,11 +310,9 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     - end_hour: Hour of the day by which inspections must end
     - max_distance_km: Maximum allowed distance between consecutive cases to group them
     - max_cases_per_slot: Maximum number of cases allowed in a single timeslot group
-    
-    Returns:
-    - A list of tuples (coordinate, postal, timeslot_str) containing both open and resolved cases
+    - valuer_home: The valuer's home location coordinates [latitude, longitude]
     """
-    st.session_state.logs.append(f"Starting integrated scheduling with {len(open_cases_with_postal)} open cases and {len(resolved_cases)} resolved cases")
+    st.session_state.logs.append(f"Starting integrated scheduling with {len(open_cases_with_case_id)} open cases and {len(resolved_cases)} resolved cases")
     
     if blocked_slots is None:
         blocked_slots = []
@@ -323,9 +322,9 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
         st.session_state.logs.append("No resolved cases, using shortest path algorithm for open cases")
         
         # Check if we have open cases
-        if open_cases_with_postal:
+        if open_cases_with_case_id:
             # Extract coordinates for routing
-            coords_only = [case[0] for case in open_cases_with_postal]
+            coords_only = [case[0] for case in open_cases_with_case_id]
             
             # Start with the coordinate closest to valuer's home
             start_coord = min(coords_only, key=lambda x: geodesic(x, valuer_home).km)
@@ -335,14 +334,14 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             optimal_route = find_shortest_path(coords_only, start_coord)
             
             # Create a mapping from coordinates to the full case info
-            coord_to_case = {case[0]: case for case in open_cases_with_postal}
+            coord_to_case = {case[0]: case for case in open_cases_with_case_id}
             
             # Reorder open cases and inspection times based on the optimal route
             reordered_open_cases = [coord_to_case[coord] for coord in optimal_route]
             reordered_inspection_times = []
             
             # Create a mapping from original coordinates to inspection times
-            coord_to_time = {open_cases_with_postal[i][0]: inspection_times[i] for i in range(len(open_cases_with_postal))}
+            coord_to_time = {open_cases_with_case_id[i][0]: inspection_times[i] for i in range(len(open_cases_with_case_id))}
             
             # Reorder inspection times to match the new route order
             for case in reordered_open_cases:
@@ -424,12 +423,12 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
     
     # If we have resolved cases, create a combined route with resolved cases as anchors
     integrated_route = []
-    remaining_open_cases = list(open_cases_with_postal)
-    inspection_times_map = {open_cases_with_postal[i][0]: inspection_times[i] for i in range(len(open_cases_with_postal))}
+    remaining_open_cases = list(open_cases_with_case_id)
+    inspection_times_map = {open_cases_with_case_id[i][0]: inspection_times[i] for i in range(len(open_cases_with_case_id))}
     
     # First, identify open cases that can be grouped with resolved cases
     open_cases_to_group = []
-    for i, (open_coord, open_postal) in enumerate(remaining_open_cases):
+    for i, (open_coord, open_case_id) in enumerate(remaining_open_cases):
         inspection_time = inspection_times_map[open_coord]
         # Only consider open cases with 1-hour inspection time for grouping
         for resolved_case in parsed_resolved_cases:
@@ -440,14 +439,14 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
             # Check if can be grouped based on proximity, duration, and available slots
             if (can_group_with_resolved_case(open_coord, resolved_coord, inspection_time, resolved_duration) and 
                 resolved_case["grouped_cases"] < max_cases_per_slot):
-                open_cases_to_group.append((i, open_coord, open_postal, resolved_case))
+                open_cases_to_group.append((i, open_coord, open_case_id, resolved_case))
                 
                 # Update grouped_cases counter for ALL resolved cases with the same timeslot
                 for rc in parsed_resolved_cases:
                     if rc["timeslot_key"] == timeslot_key:
                         rc["grouped_cases"] += 1
                 
-                st.session_state.logs.append(f"Grouping open case {open_postal} with resolved case {resolved_case['case_id']} (now {resolved_case['grouped_cases']} cases in this slot)")
+                st.session_state.logs.append(f"Grouping open case {open_case_id} with resolved case {resolved_case['case_id']} (now {resolved_case['grouped_cases']} cases in this slot)")
                 break  # Once grouped with a resolved case, don't try to group with others
     
     # Helper function to get key value for sorting slots
@@ -491,9 +490,9 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
         final_result.append((resolved_case["location"], resolved_case["case_id"], time_slot))
         
         # Add any open cases grouped with this resolved case
-        for i, open_coord, open_postal, rc in open_cases_to_group:
+        for i, open_coord, open_case_id, rc in open_cases_to_group:
             if rc["case_id"] == resolved_case["case_id"]:
-                final_result.append((open_coord, open_postal, time_slot))
+                final_result.append((open_coord, open_case_id, time_slot))
                 # Mark for removal from remaining open cases
                 remaining_open_cases[i] = None
     
@@ -954,7 +953,7 @@ def assign_timeslots_with_resolved_cases(open_cases_with_postal, inspection_time
                 
                 final_result.extend(remaining_slots)
         # Handle case where no resolved cases exist or all open cases still need scheduling
-        if not parsed_resolved_cases or (len(remaining_open_cases) == len(open_cases_with_postal)):
+        if not parsed_resolved_cases or (len(remaining_open_cases) == len(open_cases_with_case_id)):
             # Use original algorithm for remaining cases
             st.session_state.logs.append(f"Scheduling {len(remaining_open_cases)} remaining open cases with original algorithm")
             
@@ -1079,7 +1078,6 @@ blocked_times = st.sidebar.text_input(
 holidays = st.sidebar.multiselect(
     "Holidays",
     options=[(datetime.now() + timedelta(days=i)).strftime("%d/%m/%Y") for i in range(0, 365)],
-    default=["08/04/2025", "09/04/2025"],
     help="Select dates where the whole day is blocked (e.g., public holidays)."
 )
 current_date = st.sidebar.date_input("Current Date", datetime.now().date(), format="DD/MM/YYYY")
@@ -1341,8 +1339,8 @@ with col1:
         if len(st.session_state.open_cases) == 0 and len(st.session_state.resolved_cases) == 0:
             st.warning("Add at least 1 open case or 1 resolved case.")
         else:
-            # Prepare open cases with postal codes
-            open_cases_with_postal = [(coord, f"OC{i+1:03}") for i, coord in enumerate(st.session_state.open_cases)]
+            # Prepare open cases with case IDs
+            open_cases_with_case_id = [(coord, f"OC{i+1:03}") for i, coord in enumerate(st.session_state.open_cases)]
             
             # Get inspection time inputs (ensure they retain the previous values)
             inspection_times = []
@@ -1352,12 +1350,13 @@ with col1:
             
             # Call the new integrated scheduling algorithm
             route_with_timeslot = assign_timeslots_with_resolved_cases(
-                open_cases_with_postal=open_cases_with_postal,
+                open_cases_with_case_id=open_cases_with_case_id,
                 inspection_times=inspection_times,
                 resolved_cases=st.session_state.resolved_cases,
                 blocked_slots=st.session_state.blocked_slots,
                 holidays_set=st.session_state.holiday_set,
-                current_date=st.session_state.current_date
+                current_date=st.session_state.current_date,
+                valuer_home=valuer_home
             )
             
             st.session_state.route_data = route_with_timeslot
